@@ -1,0 +1,16 @@
+# Дані: датасети, метадані, спектрограми — все велике живе в data/
+data/
+*.zip
+
+# Робочий контекст Claude, в репо не їде
+CLAUDE.md
+.claude/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
