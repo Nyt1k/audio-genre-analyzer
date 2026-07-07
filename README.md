@@ -8,6 +8,8 @@ Learning for AI Applications course (MSc Computer Science).
 The pipeline is fully local: a CNN trained on FMA medium, a FastAPI inference
 server and a Flutter desktop app. No cloud, no external APIs.
 
+![Genre Analyzer live view](docs/img/app.png)
+
 ## What is in the repo
 
 - `ml/` - training and experiments. `ml/src` holds the Python scripts
@@ -102,7 +104,8 @@ is small enough that CPU inference takes ~10ms per window).
   30-second track excerpts, 16 top-level genres.
 - Class selection: Easy Listening (21 tracks) and Blues (74) dropped as too
   small; Rock (7103) and Electronic (6314) randomly capped to 3000 each
-  (seed=42). Result: 14 classes, 17 488 tracks.
+  (seed=42). Result: 14 classes, 17 488 tracks; 11 known-corrupt FMA mp3s are
+  skipped during preprocessing, leaving 17 477 spectrograms.
 - Train/validation/test split: the official artist-aware split from FMA
   metadata (no artist leakage). Splitting is always by track, never by window.
 - Features: log-mel spectrograms - 22 050 Hz mono, 128 mel bins, FFT 2048,
@@ -120,6 +123,19 @@ ResNet18 transfer-learning variants performed worse than the from-scratch
 CNN; the full experiment log with plots and conclusions is in
 `ml/notebooks/resnet_results.ipynb`, the final test evaluation in
 `ml/notebooks/final_evaluation.ipynb`.
+
+Per-class recall on test is extremely uneven: acoustically distinct genres
+are recognized reliably, while diffuse categories without a sound of their
+own drift into neighboring genres (which is also what the confusion matrix
+shows - the errors are semantic, not random):
+
+| best                | recall | worst    | recall |
+|---------------------|--------|----------|--------|
+| Old-Time / Historic | 1.00   | Soul-RnB | 0.12   |
+| Classical           | 0.92   | Country  | 0.28   |
+| Hip-Hop             | 0.82   | Pop      | 0.29   |
+
+![Track-level confusion matrix on test](docs/img/confusion_matrix_test.png)
 
 ## Reproducing the training
 

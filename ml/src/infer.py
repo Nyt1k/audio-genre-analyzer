@@ -46,7 +46,7 @@ def window_to_input(samples, normalize):
         y=samples, sr=SR, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP_LENGTH
     )
     # ref=max like in preprocess.py; there it was the whole-track max,
-    # here the window max -- the model proved robust to this shift (see tests)
+    # here the window max -- in practice the model is robust to this shift
     logmel = librosa.power_to_db(mel, ref=np.max)[:, :WINDOW_FRAMES]
     if normalize == "global":
         logmel = (logmel - DB_MIN) / -DB_MIN
