@@ -23,39 +23,44 @@ server and a Flutter desktop app. No cloud, no external APIs.
   (`data/spectrograms/index.csv`) and five test spectrogram images
   (`data/test_images/`).
 
-## Running it on a fresh Mac
+## Quick start
 
-Requirements: macOS 13+ (ScreenCaptureKit), Python 3.11+. ffmpeg and the
-dataset are NOT needed to run the app - the trained checkpoint is in the repo.
+Requirements: Python 3.11+; macOS 13+ for live capture. ffmpeg and the
+dataset are NOT needed to run the app - the trained checkpoint is in the
+repo. One command sets up the Python venv, launches the app (prebuilt bundle
+if present, otherwise builds it - needs [Flutter](https://flutter.dev)) and
+starts the inference server:
 
 ```bash
 git clone https://github.com/Nyt1k/audio-genre-analyzer.git
 cd audio-genre-analyzer
-
-# 1. server
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn server.main:app --port 8000
+./scripts/run.sh                                        # macOS / Linux
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1   # Windows
 ```
 
-App, two options:
+To skip building from source, download the app archive for your OS from
+[GitHub Releases](https://github.com/Nyt1k/audio-genre-analyzer/releases)
+and unzip it into the path the script prints. On macOS also remove the
+quarantine flag first (the app is not notarized):
+`xattr -dr com.apple.quarantine "Genre Analyzer.app"`.
 
-- **Prebuilt** - download `GenreAnalyzer-macos.zip` from GitHub Releases,
-  unzip, then remove the quarantine flag (the app is not notarized):
-  `xattr -dr com.apple.quarantine "Genre Analyzer.app"` and open it.
-- **From source** - install [Flutter](https://flutter.dev), then
-  `cd app && flutter run -d macos --release`.
-
-First capture start: macOS will ask for the Screen & System Audio Recording
-permission. Allow it and restart the app (macOS applies it to new processes
-only). If capture is still blocked, the in-app OPEN SETTINGS button jumps to
-the right System Settings pane. Note: the app is ad-hoc signed, so after
-rebuilding it from source macOS forgets the permission; reset it with
+First capture start on macOS: the system asks for the Screen & System Audio
+Recording permission. Allow it and restart the app (macOS applies it to new
+processes only). If capture is still blocked, the in-app OPEN SETTINGS
+button jumps to the right System Settings pane. The app is ad-hoc signed, so
+after rebuilding it from source macOS forgets the permission; reset with
 `tccutil reset ScreenCapture dev.nytik.genreAnalyzer` and allow again.
 
-In VS Code the whole stack starts with one task: `genre: run all`
+In VS Code the stack also starts with one task: `genre: run all`
 (or `genre: run all (release)` for the release build).
+
+### Releases
+
+Pushing a `v*` tag builds the app for macOS, Windows and Linux on GitHub
+Actions and attaches the archives to the release automatically
+(`.github/workflows/release.yml`). Locally, `scripts/release.sh`
+(or `scripts/release.ps1` on Windows) builds the current platform into
+`dist/`.
 
 ## Using the app
 

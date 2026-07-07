@@ -27,3 +27,4 @@ __pycache__/
 
 # Xcode build artifacts
 build/
+dist/
