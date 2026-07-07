@@ -24,35 +24,58 @@ class SpectrumView extends StatefulWidget {
 class _SpectrumDisplay {
   _SpectrumDisplay(int bands, double floorDb)
       : display = Float64List(bands)..fillRange(0, bands, floorDb),
-        peaks = Float64List(bands)..fillRange(0, bands, floorDb);
+        peaks = Float64List(bands)..fillRange(0, bands, floorDb),
+        trail = List.generate(trailLayers,
+            (_) => Float64List(bands)..fillRange(0, bands, floorDb));
+
+  static const trailLayers = 4;
 
   final Float64List display;
   final Float64List peaks;
+
+  /// Snapshots of the curve, newest first - painted as fading echoes.
+  final List<Float64List> trail;
   double centroidHz = 0;
 }
 
 class _SpectrumViewState extends State<SpectrumView>
     with SingleTickerProviderStateMixin {
   // time constants make the motion frame-rate independent
-  static const _attackTau = 0.030; // s, rise
-  static const _releaseTau = 0.160; // s, fall
-  static const _peakFallDbPerSec = 9.0;
+  static const _attackTau = 0.025; // s, rise stays snappy
+  // falling is gravity, not exponential decay: speed builds up while there
+  // is no upward impulse, like on a real analyzer
+  static const _gravityDb = 550.0; // dB/s^2, main curve
+  static const _peakGravityDb = 260.0; // dB/s^2, peak caps
+  static const _peakHoldS = 0.35; // s a cap holds before falling
+  static const _trailEveryS = 0.075; // s between echo snapshots
   // no fresh audio for this long = the source went quiet, fall to the floor
   static const _staleAfter = Duration(milliseconds: 300);
 
   late final Ticker _ticker;
   late _SpectrumDisplay _state;
+  late Float64List _fallVel;
+  late Float64List _peakVel;
+  late Float64List _peakHold;
   final ValueNotifier<int> _frame = ValueNotifier<int>(0);
 
   int _lastRevision = -1;
   Duration _lastData = Duration.zero;
   Duration _lastTick = Duration.zero;
+  double _trailTimer = 0;
 
   @override
   void initState() {
     super.initState();
-    _state = _SpectrumDisplay(widget.spectrum.bands, widget.spectrum.floorDb);
+    _allocate();
     _ticker = createTicker(_onTick)..start();
+  }
+
+  void _allocate() {
+    final s = widget.spectrum;
+    _state = _SpectrumDisplay(s.bands, s.floorDb);
+    _fallVel = Float64List(s.bands);
+    _peakVel = Float64List(s.bands);
+    _peakHold = Float64List(s.bands);
   }
 
   @override
@@ -64,9 +87,7 @@ class _SpectrumViewState extends State<SpectrumView>
 
   void _onTick(Duration elapsed) {
     final s = widget.spectrum;
-    if (_state.display.length != s.bands) {
-      _state = _SpectrumDisplay(s.bands, s.floorDb);
-    }
+    if (_state.display.length != s.bands) _allocate();
     final dt =
         ((elapsed - _lastTick).inMicroseconds / 1e6).clamp(0.0, 0.05);
     _lastTick = elapsed;
@@ -77,22 +98,50 @@ class _SpectrumViewState extends State<SpectrumView>
     final stale = elapsed - _lastData > _staleAfter;
 
     final attackK = 1 - math.exp(-dt / _attackTau);
-    final releaseK = 1 - math.exp(-dt / _releaseTau);
-    final peakFall = _peakFallDbPerSec * dt;
     var changed = false;
 
     for (var b = 0; b < s.bands; b++) {
       final current = _state.display[b];
       final target = stale ? s.floorDb : s.levels[b];
-      final k = target > current ? attackK : releaseK;
-      final next = current + (target - current) * k;
+      double next;
+      if (target >= current) {
+        next = current + (target - current) * attackK;
+        _fallVel[b] = 0;
+      } else {
+        // free fall: velocity builds while there is no upward impulse
+        _fallVel[b] += _gravityDb * dt;
+        next = current - _fallVel[b] * dt;
+        if (next <= target) {
+          next = target;
+          _fallVel[b] = 0;
+        }
+      }
       if ((next - current).abs() > 0.02) changed = true;
       _state.display[b] = next;
 
-      final held =
-          math.max(next, _state.peaks[b] - peakFall).clamp(s.floorDb, 0.0);
-      if ((held - _state.peaks[b]).abs() > 0.02) changed = true;
-      _state.peaks[b] = held;
+      // peak cap: ride the curve up, hold for a moment, then fall with
+      // its own gravity until it lands back on the curve
+      if (next >= _state.peaks[b]) {
+        _state.peaks[b] = next;
+        _peakVel[b] = 0;
+        _peakHold[b] = _peakHoldS;
+      } else if (_peakHold[b] > 0) {
+        _peakHold[b] -= dt;
+      } else {
+        _peakVel[b] += _peakGravityDb * dt;
+        final p = math.max(_state.peaks[b] - _peakVel[b] * dt, next);
+        if ((p - _state.peaks[b]).abs() > 0.02) changed = true;
+        _state.peaks[b] = p;
+      }
+    }
+
+    _trailTimer += dt;
+    if (_trailTimer >= _trailEveryS) {
+      _trailTimer = 0;
+      final recycled = _state.trail.removeLast();
+      recycled.setAll(0, _state.display);
+      _state.trail.insert(0, recycled);
+      changed = true;
     }
 
     final centroid = stale ? 0.0 : s.centroidHz;
@@ -206,7 +255,20 @@ class _SpectrumCurvePainter extends CustomPainter {
     if (n == 0) return;
     final bandW = plot.width / n;
 
-    // peak hold: a smooth trace behind everything, violet underlay for depth
+    // motion echoes: past curve snapshots fading into violet, oldest first
+    for (var i = state.trail.length - 1; i >= 0; i--) {
+      final alpha = 0.05 + 0.045 * (state.trail.length - 1 - i);
+      canvas.drawPath(
+        _smoothPath(_points(state.trail[i], plot, bandW)),
+        Paint()
+          ..color = AppColors.accent2.withValues(alpha: alpha)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.6
+          ..strokeJoin = StrokeJoin.round,
+      );
+    }
+
+    // peak hold: a smooth trace behind the live curve
     // (no blur - MaskFilter is a raster op and kills the frame rate)
     final peakPath = _smoothPath(_points(state.peaks, plot, bandW));
     canvas.drawPath(
