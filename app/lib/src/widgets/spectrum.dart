@@ -20,20 +20,38 @@ class SpectrumView extends StatefulWidget {
   State<SpectrumView> createState() => _SpectrumViewState();
 }
 
+/// Everything the curve painter reads; owned and advanced by the view ticker.
+class _SpectrumDisplay {
+  _SpectrumDisplay(int bands, double floorDb)
+      : display = Float64List(bands)..fillRange(0, bands, floorDb),
+        peaks = Float64List(bands)..fillRange(0, bands, floorDb);
+
+  final Float64List display;
+  final Float64List peaks;
+  double centroidHz = 0;
+}
+
 class _SpectrumViewState extends State<SpectrumView>
     with SingleTickerProviderStateMixin {
-  static const _attack = 0.55;
-  static const _release = 0.10;
+  // time constants make the motion frame-rate independent
+  static const _attackTau = 0.030; // s, rise
+  static const _releaseTau = 0.160; // s, fall
+  static const _peakFallDbPerSec = 9.0;
+  // no fresh audio for this long = the source went quiet, fall to the floor
+  static const _staleAfter = Duration(milliseconds: 300);
 
   late final Ticker _ticker;
-  late Float64List _display;
+  late _SpectrumDisplay _state;
   final ValueNotifier<int> _frame = ValueNotifier<int>(0);
+
+  int _lastRevision = -1;
+  Duration _lastData = Duration.zero;
+  Duration _lastTick = Duration.zero;
 
   @override
   void initState() {
     super.initState();
-    _display = Float64List(widget.spectrum.bands)
-      ..fillRange(0, widget.spectrum.bands, widget.spectrum.floorDb);
+    _state = _SpectrumDisplay(widget.spectrum.bands, widget.spectrum.floorDb);
     _ticker = createTicker(_onTick)..start();
   }
 
@@ -46,17 +64,41 @@ class _SpectrumViewState extends State<SpectrumView>
 
   void _onTick(Duration elapsed) {
     final s = widget.spectrum;
-    if (_display.length != s.bands) {
-      _display = Float64List(s.bands)..fillRange(0, s.bands, s.floorDb);
+    if (_state.display.length != s.bands) {
+      _state = _SpectrumDisplay(s.bands, s.floorDb);
     }
+    final dt =
+        ((elapsed - _lastTick).inMicroseconds / 1e6).clamp(0.0, 0.05);
+    _lastTick = elapsed;
+    if (s.revision != _lastRevision) {
+      _lastRevision = s.revision;
+      _lastData = elapsed;
+    }
+    final stale = elapsed - _lastData > _staleAfter;
+
+    final attackK = 1 - math.exp(-dt / _attackTau);
+    final releaseK = 1 - math.exp(-dt / _releaseTau);
+    final peakFall = _peakFallDbPerSec * dt;
     var changed = false;
+
     for (var b = 0; b < s.bands; b++) {
-      final current = _display[b];
-      final target = s.levels[b];
-      final k = target > current ? _attack : _release;
+      final current = _state.display[b];
+      final target = stale ? s.floorDb : s.levels[b];
+      final k = target > current ? attackK : releaseK;
       final next = current + (target - current) * k;
       if ((next - current).abs() > 0.02) changed = true;
-      _display[b] = next;
+      _state.display[b] = next;
+
+      final held =
+          math.max(next, _state.peaks[b] - peakFall).clamp(s.floorDb, 0.0);
+      if ((held - _state.peaks[b]).abs() > 0.02) changed = true;
+      _state.peaks[b] = held;
+    }
+
+    final centroid = stale ? 0.0 : s.centroidHz;
+    if (centroid != _state.centroidHz) {
+      _state.centroidHz = centroid;
+      changed = true;
     }
     if (changed) _frame.value++;
   }
@@ -68,7 +110,7 @@ class _SpectrumViewState extends State<SpectrumView>
         painter: _SpectrumGridPainter(widget.spectrum),
         foregroundPainter: _SpectrumCurvePainter(
           spectrum: widget.spectrum,
-          display: _display,
+          state: _state,
           repaint: _frame,
         ),
         child: const SizedBox.expand(),
@@ -126,12 +168,12 @@ class _SpectrumGridPainter extends CustomPainter {
 class _SpectrumCurvePainter extends CustomPainter {
   _SpectrumCurvePainter({
     required this.spectrum,
-    required this.display,
+    required this.state,
     required Listenable repaint,
   }) : super(repaint: repaint);
 
   final SpectrumAnalyzer spectrum;
-  final Float64List display;
+  final _SpectrumDisplay state;
 
   double _y(double db, Size plot) =>
       plot.height * (db.clamp(spectrum.floorDb, 0.0) / spectrum.floorDb);
@@ -160,13 +202,13 @@ class _SpectrumCurvePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final plot = Size(size.width - _rightAxis, size.height - _bottomAxis);
-    final n = display.length;
+    final n = state.display.length;
     if (n == 0) return;
     final bandW = plot.width / n;
 
     // peak hold: a smooth trace behind everything, violet underlay for depth
     // (no blur - MaskFilter is a raster op and kills the frame rate)
-    final peakPath = _smoothPath(_points(spectrum.peaks, plot, bandW));
+    final peakPath = _smoothPath(_points(state.peaks, plot, bandW));
     canvas.drawPath(
       peakPath,
       Paint()
@@ -182,7 +224,7 @@ class _SpectrumCurvePainter extends CustomPainter {
         ..strokeWidth = 1.3,
     );
 
-    final points = _points(display, plot, bandW);
+    final points = _points(state.display, plot, bandW);
     final fill = _smoothPath(points)
       ..lineTo(plot.width, plot.height)
       ..lineTo(points.first.dx, plot.height)
@@ -232,7 +274,7 @@ class _SpectrumCurvePainter extends CustomPainter {
 
   // vertical marker at the spectral centroid: the "brightness" of the sound
   void _paintCentroid(Canvas canvas, Size plot, double bandW) {
-    final hz = spectrum.centroidHz;
+    final hz = state.centroidHz;
     if (hz < spectrum.minHz) return;
     var x = -1.0;
     for (var b = 0; b < spectrum.bands; b++) {
@@ -259,5 +301,5 @@ class _SpectrumCurvePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_SpectrumCurvePainter oldDelegate) =>
-      oldDelegate.display != display || oldDelegate.spectrum != spectrum;
+      oldDelegate.state != state || oldDelegate.spectrum != spectrum;
 }

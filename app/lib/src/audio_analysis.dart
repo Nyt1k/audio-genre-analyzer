@@ -57,9 +57,10 @@ class WaveHistory extends ChangeNotifier {
   double get lastPeakDb => _filled == 0 ? -90 : peakAt(_filled - 1);
 }
 
-/// Live spectrum in log-spaced bands. Levels are raw per-frame values;
-/// display ballistics (attack/release smoothing) happen in the view at the
-/// frame rate. Peak hold with slow decay is kept here.
+/// Live spectrum in log-spaced bands. Levels are raw per-analysis values;
+/// all display ballistics (attack/release, peak hold and decay) live in the
+/// view ticker, so the picture keeps moving even when the capture source
+/// stops delivering buffers (ScreenCaptureKit goes quiet on silence).
 class SpectrumAnalyzer extends ChangeNotifier {
   SpectrumAnalyzer({
     required this.sampleRate,
@@ -67,8 +68,7 @@ class SpectrumAnalyzer extends ChangeNotifier {
     this.minHz = 20,
     this.maxHz = 20000,
     this.floorDb = -90,
-  })  : levels = Float64List(bands)..fillRange(0, bands, -90),
-        peaks = Float64List(bands)..fillRange(0, bands, -90) {
+  }) : levels = Float64List(bands)..fillRange(0, bands, -90) {
     _fft = FFT(fftSize);
     _hann = Float64List.fromList(List.generate(
         fftSize,
@@ -78,7 +78,6 @@ class SpectrumAnalyzer extends ChangeNotifier {
   }
 
   static const fftSize = 4096;
-  static const _peakRelease = 0.985;
 
   final int sampleRate;
   final int bands;
@@ -86,12 +85,14 @@ class SpectrumAnalyzer extends ChangeNotifier {
   final double maxHz;
   final double floorDb;
 
-  /// Raw band levels and peak-hold levels, dBFS.
+  /// Raw band levels, dBFS.
   final Float64List levels;
-  final Float64List peaks;
 
   /// Spectral centroid ("brightness" of the sound), Hz. 0 when silent.
   double centroidHz = 0;
+
+  /// Bumped on every analysis; the view uses it to detect a stalled stream.
+  int revision = 0;
 
   late final FFT _fft;
   late final Float64List _hann;
@@ -167,19 +168,17 @@ class SpectrumAnalyzer extends ChangeNotifier {
         power += re * re + im * im;
       }
       final magnitude = math.sqrt(power / (hi - lo)) * norm;
-      final db = _toDb(magnitude).clamp(floorDb, 0.0);
-
-      levels[b] = db;
-      final held = peaks[b] * _peakRelease + floorDb * (1 - _peakRelease);
-      peaks[b] = math.max(db, held);
+      levels[b] = _toDb(magnitude).clamp(floorDb, 0.0);
     }
+    revision++;
     notifyListeners();
   }
 
   void clear() {
     levels.fillRange(0, bands, floorDb);
-    peaks.fillRange(0, bands, floorDb);
+    centroidHz = 0;
     _framePos = 0;
+    revision++;
     notifyListeners();
   }
 }
