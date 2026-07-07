@@ -38,6 +38,27 @@
             "problemMatcher": []
         },
         {
+            "label": "genre: app (profile)",
+            "type": "shell",
+            "command": "flutter",
+            "args": ["run", "-d", "macos", "--profile"],
+            "options": {
+                "cwd": "${workspaceFolder}/app"
+            },
+            "isBackground": true,
+            "presentation": {
+                "panel": "dedicated",
+                "group": "genre"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "genre: run all (profile)",
+            "dependsOn": ["genre: server", "genre: app (profile)"],
+            "dependsOrder": "parallel",
+            "problemMatcher": []
+        },
+        {
             "label": "genre: release build + open",
             "type": "shell",
             "command": "sh",
