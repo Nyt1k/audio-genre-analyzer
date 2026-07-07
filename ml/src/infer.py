@@ -9,6 +9,7 @@ CLI for a quick check on a file:
 """
 
 import argparse
+from collections import deque
 from pathlib import Path
 
 import librosa
@@ -20,6 +21,15 @@ from models import build_model
 from preprocess import HOP_LENGTH, N_FFT, N_MELS, SR
 
 WINDOW_SAMPLES = WINDOW_FRAMES * HOP_LENGTH  # 5s of audio at SR
+
+# EMA weight of the newest window in the 'recent' aggregate; with 1s hops
+# the effective memory is ~1/alpha = 7s of audio
+RECENT_ALPHA = 0.15
+
+# the session mean covers at most this many windows (~5 min at 1s hops);
+# without a cap an endless gapless stream freezes the verdict, because a new
+# window only weighs 1/n
+SESSION_MAX_WINDOWS = 300
 
 
 def load_checkpoint(path, device="cpu"):
@@ -57,15 +67,18 @@ class SlidingWindowClassifier:
 
     def reset(self):
         self.buffer = np.zeros(0, dtype=np.float32)
-        self.prob_sum = np.zeros(len(self.classes))
+        self.window_probs = deque(maxlen=SESSION_MAX_WINDOWS)
         self.n_windows = 0
+        # EMA over windows: follows what is playing right now, unlike the
+        # session mean which weighs its whole history equally
+        self.recent_probs = np.full(len(self.classes), 1 / len(self.classes))
 
     @property
     def session_probs(self):
-        """Running mean distribution over everything heard so far."""
-        if self.n_windows == 0:
+        """Mean distribution over the session (capped at SESSION_MAX_WINDOWS)."""
+        if not self.window_probs:
             return np.full(len(self.classes), 1 / len(self.classes))
-        return self.prob_sum / self.n_windows
+        return np.mean(self.window_probs, axis=0)
 
     def _predict(self, samples):
         x = window_to_input(samples, self.normalize).to(self.device)
@@ -85,11 +98,60 @@ class SlidingWindowClassifier:
         while len(self.buffer) >= WINDOW_SAMPLES:
             window = self.buffer[:WINDOW_SAMPLES]
             probs = self._predict(window)
-            self.prob_sum += probs
+            self.window_probs.append(probs)
+            if self.n_windows == 0:
+                self.recent_probs = probs.copy()
+            else:
+                self.recent_probs = ((1 - RECENT_ALPHA) * self.recent_probs
+                                     + RECENT_ALPHA * probs)
             self.n_windows += 1
-            results.append({"window": probs, "session": self.session_probs.copy()})
+            results.append({"window": probs, "session": self.session_probs.copy(),
+                            "recent": self.recent_probs.copy()})
             self.buffer = self.buffer[self.hop_samples:]
         return results
+
+
+def image_to_logmel(image_bytes):
+    """Rendered spectrogram image -> approximate log-mel array in dB.
+
+    Assumes a plain spectrogram image: low frequencies at the bottom,
+    brightness monotonic in level (true for viridis/magma colormaps whose
+    luminance tracks the value). Grayscale luminance maps linearly onto
+    [-80, 0] dB; one pixel column = one frame.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    img = Image.open(BytesIO(image_bytes)).convert("L")
+    width = max(img.width, WINDOW_FRAMES)
+    img = img.resize((width, N_MELS), Image.BILINEAR)
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    arr = np.flipud(arr)  # image row 0 is the top = highest frequency
+    return arr * -DB_MIN + DB_MIN
+
+
+def logmel_distribution(model, logmel, normalize, device="cpu"):
+    """Mean prediction over 5s windows of a full log-mel array.
+
+    Returns (probs, n_windows)."""
+    device = torch.device(device)
+    hop = WINDOW_FRAMES // 2
+    starts = range(0, max(logmel.shape[1] - WINDOW_FRAMES, 0) + 1, hop)
+    probs = []
+    for start in starts:
+        window = logmel[:, start:start + WINDOW_FRAMES]
+        if window.shape[1] < WINDOW_FRAMES:
+            break
+        if normalize == "global":
+            x = (window - DB_MIN) / -DB_MIN
+        else:
+            x = (window - window.mean()) / (window.std() + 1e-6)
+        t = (torch.from_numpy(np.ascontiguousarray(x, dtype=np.float32))
+             .unsqueeze(0).unsqueeze(0).to(device))
+        with torch.no_grad():
+            probs.append(torch.softmax(model(t), dim=1)[0].cpu().numpy())
+    return np.mean(probs, axis=0), len(probs)
 
 
 def classify_file(checkpoint_path, audio_path, hop_s=2.5, device="cpu"):

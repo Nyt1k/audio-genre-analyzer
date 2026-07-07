@@ -1,0 +1,64 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "genre: server",
+            "type": "shell",
+            "command": "${workspaceFolder}/.venv/bin/uvicorn",
+            "args": ["server.main:app", "--port", "8000"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "presentation": {
+                "panel": "dedicated",
+                "group": "genre"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "genre: app",
+            "type": "shell",
+            "command": "flutter",
+            "args": ["run", "-d", "macos"],
+            "options": {
+                "cwd": "${workspaceFolder}/app"
+            },
+            "isBackground": true,
+            "presentation": {
+                "panel": "dedicated",
+                "group": "genre"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "genre: run all",
+            "dependsOn": ["genre: server", "genre: app"],
+            "dependsOrder": "parallel",
+            "problemMatcher": []
+        },
+        {
+            "label": "genre: release build + open",
+            "type": "shell",
+            "command": "sh",
+            "args": [
+                "-c",
+                "flutter build macos --release && open \"build/macos/Build/Products/Release/Genre Analyzer.app\""
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/app"
+            },
+            "presentation": {
+                "panel": "dedicated",
+                "group": "genre"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "genre: run all (release)",
+            "dependsOn": ["genre: server", "genre: release build + open"],
+            "dependsOrder": "parallel",
+            "problemMatcher": []
+        }
+    ]
+}

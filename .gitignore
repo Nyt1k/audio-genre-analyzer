@@ -1,5 +1,15 @@
-# Дані: датасети, метадані, спектрограми — все велике живе в data/
-data/
+# Дані: великі датасети живуть локально; дрібні артефакти нижче дозволені
+# явно, щоб репо запускалось без 23GB аудіо: робочий чекпоінт, криві
+# тренувань, index з мітками і тестові картинки спектрограм
+data/*
+!data/test_images/
+!data/spectrograms/
+data/spectrograms/*
+!data/spectrograms/index.csv
+!data/runs/
+data/runs/*/*
+!data/runs/*/history.csv
+!data/runs/baseline_aug/best.pt
 *.zip
 
 # Робочий контекст Claude, в репо не їде
@@ -14,3 +24,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Xcode build artifacts
+build/

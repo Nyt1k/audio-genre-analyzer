@@ -3,6 +3,8 @@ torch
 torchvision
 tensorboard
 scikit-learn
+fastapi
+uvicorn
 pandas
 matplotlib
 librosa

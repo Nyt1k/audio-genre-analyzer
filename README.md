@@ -1,58 +1,127 @@
-# Audio Genre Analyzer
+# Genre Analyzer
 
-Live music genre classification on macOS: the app listens to system audio and shows a
-real-time probability distribution over music genres, plus an aggregated verdict for the
-whole track. Capstone project for the Advanced Deep Learning for AI Applications course
-(MSc Computer Science).
+Live music genre classification on macOS: the app listens to system audio and
+shows a real-time probability distribution over 14 genres, plus an aggregated
+verdict for the track being played. Capstone project for the Advanced Deep
+Learning for AI Applications course (MSc Computer Science).
 
-## Architecture
+The pipeline is fully local: a CNN trained on FMA medium, a FastAPI inference
+server and a Flutter desktop app. No cloud, no external APIs.
 
-The project has three parts:
+## What is in the repo
 
-- `ml/` - model training. Audio -> log-mel spectrograms -> CNN classifier. Two models are
-  compared: a small CNN trained from scratch and a transfer-learning model (ResNet18 on
-  spectrograms treated as images). Python scripts live in `ml/src`, analysis and results
-  notebooks in `ml/notebooks`.
-- `server/` (planned) - local FastAPI inference server. Accepts audio chunks, keeps a
-  sliding window, returns the genre distribution for the current window plus a running
-  mean over the whole session.
-- `app/` (planned) - Flutter macOS app. Captures system audio via ScreenCaptureKit
-  (Swift platform channel), shows a waveform timeline, live genre percentages, and the
-  aggregated result.
+- `ml/` - training and experiments. `ml/src` holds the Python scripts
+  (preprocessing, dataset, models, training, inference), `ml/notebooks` holds
+  the executed analysis notebooks with all plots and conclusions.
+- `server/` - local FastAPI inference server.
+- `app/` - Flutter desktop app (macOS; Windows/Linux builds compile, see the
+  note below).
+- `data/` - mostly local-only (the dataset is 23GB), but the repo ships the
+  small artifacts needed to run everything without retraining: the final
+  model checkpoint (`data/runs/baseline_aug/best.pt`, 1.5MB), training
+  curves of every run (`history.csv`), the track index with labels
+  (`data/spectrograms/index.csv`) and five test spectrogram images
+  (`data/test_images/`).
 
-## ML pipeline
+## Running it on a fresh Mac
 
-- Dataset: [FMA](https://github.com/mdeff/fma) `medium` subset - 25 000 30-second track
-  excerpts, 16 top-level genres.
-- Class selection: Easy Listening (21 tracks) and Blues (74) are dropped as too small;
-  Rock (7103) and Electronic (6314) are randomly capped to 3000 tracks each (seed=42).
-  Result: 14 classes, 17 488 tracks.
-- Train/validation/test split: the official artist-aware split from FMA metadata
-  (no artist leakage between sets). Splitting is always by track, never by window.
-- Features: log-mel spectrograms - 22 050 Hz mono, 128 mel bins, FFT 2048, hop 512,
-  power converted to dB. One spectrogram is stored per full 30 s track (float16 `.npy`);
-  slicing into 5 s training windows happens on the fly in the Dataset.
-- Class imbalance (3000 vs ~120 tracks) is handled at training time with class weights /
-  weighted sampling, not by discarding data.
-
-## Results
-
-The final model is the small CNN (0.39M parameters) trained with SpecAugment. On the
-held-out test set (1794 tracks, evaluated once): track-level accuracy 59.4%, macro-F1
-0.534, top-3 accuracy 83.8%. All ResNet18 transfer-learning variants performed worse
-than the from-scratch CNN; the full experiment log with plots and conclusions is in
-`ml/notebooks/resnet_results.ipynb`, final test evaluation in
-`ml/notebooks/final_evaluation.ipynb`.
-
-## Reproducing
-
-Requirements: Python 3.13+, ffmpeg (`brew install ffmpeg`).
+Requirements: macOS 13+ (ScreenCaptureKit), Python 3.11+. ffmpeg and the
+dataset are NOT needed to run the app - the trained checkpoint is in the repo.
 
 ```bash
+git clone https://github.com/Nyt1k/audio-genre-analyzer.git
+cd audio-genre-analyzer
+
+# 1. server
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+uvicorn server.main:app --port 8000
+```
 
+App, two options:
+
+- **Prebuilt** - download `GenreAnalyzer-macos.zip` from GitHub Releases,
+  unzip, then remove the quarantine flag (the app is not notarized):
+  `xattr -dr com.apple.quarantine "Genre Analyzer.app"` and open it.
+- **From source** - install [Flutter](https://flutter.dev), then
+  `cd app && flutter run -d macos --release`.
+
+First capture start: macOS will ask for the Screen & System Audio Recording
+permission. Allow it and restart the app (macOS applies it to new processes
+only). If capture is still blocked, the in-app OPEN SETTINGS button jumps to
+the right System Settings pane. Note: the app is ad-hoc signed, so after
+rebuilding it from source macOS forgets the permission; reset it with
+`tccutil reset ScreenCapture dev.nytik.genreAnalyzer` and allow again.
+
+In VS Code the whole stack starts with one task: `genre: run all`
+(or `genre: run all (release)` for the release build).
+
+## Using the app
+
+**LIVE tab** - pick a source (whole system audio or a single application),
+press START and play music:
+
+- level meter with RMS/peak history, dynamics band and 5s window markers -
+  the exact chunks the model consumes;
+- live spectrum analyzer (FFT, 72 log bands, peak hold, spectral centroid);
+- NOW panel: what is playing right now (exponential average, ~7s memory);
+- SESSION panel: the aggregated verdict for the current track.
+
+Session semantics: the session verdict is the mean over the last 300 model
+windows (~5 minutes) at most. It resets on START, on source change and
+automatically on a silence gap (2.5s below -55 dBFS), which in practice
+means a new track in any player.
+
+**SPECTROGRAM tab** - feed the model a rendered spectrogram image instead of
+audio: pick a png/jpg, the server reconstructs the log-mel array from pixel
+brightness and runs the same CNN. Try the samples in `data/test_images/`
+(named by their true genre). Plain spectrogram images without axes work best.
+
+## Server API
+
+| Endpoint | Description |
+|---|---|
+| `POST /audio?sr=<rate>` | body: raw mono float32 PCM chunk. Returns the current window distribution, the recent EMA and the session mean |
+| `POST /image` | body: a spectrogram image. Returns the model distribution |
+| `POST /reset` | start a new session |
+| `GET /status` | model info and session counters |
+
+Configuration via env vars: `GENRE_CHECKPOINT` (default
+`data/runs/baseline_aug/best.pt`), `GENRE_DEVICE` (default `cpu` - the model
+is small enough that CPU inference takes ~10ms per window).
+
+## ML pipeline
+
+- Dataset: [FMA](https://github.com/mdeff/fma) `medium` subset - 25 000
+  30-second track excerpts, 16 top-level genres.
+- Class selection: Easy Listening (21 tracks) and Blues (74) dropped as too
+  small; Rock (7103) and Electronic (6314) randomly capped to 3000 each
+  (seed=42). Result: 14 classes, 17 488 tracks.
+- Train/validation/test split: the official artist-aware split from FMA
+  metadata (no artist leakage). Splitting is always by track, never by window.
+- Features: log-mel spectrograms - 22 050 Hz mono, 128 mel bins, FFT 2048,
+  hop 512, power in dB. One spectrogram per full track (float16 `.npy`);
+  slicing into 5s windows happens on the fly in the Dataset.
+- Class imbalance (3000 vs ~120 tracks) is handled with class weights in the
+  loss, not by discarding data.
+
+## Results
+
+The final model is a small CNN (0.39M parameters) trained from scratch with
+SpecAugment. On the held-out test set (1794 tracks, evaluated once):
+track-level accuracy 59.4%, macro-F1 0.534, top-3 accuracy 83.8%. All
+ResNet18 transfer-learning variants performed worse than the from-scratch
+CNN; the full experiment log with plots and conclusions is in
+`ml/notebooks/resnet_results.ipynb`, the final test evaluation in
+`ml/notebooks/final_evaluation.ipynb`.
+
+## Reproducing the training
+
+This is the only part that needs the dataset (~23GB) and ffmpeg
+(`brew install ffmpeg`):
+
+```bash
 # metadata (~342 MB) - also done automatically by ml/notebooks/data_analyze.ipynb
 curl -o data/fma_metadata.zip https://os.unil.cloud.switch.ch/fma/fma_metadata.zip
 tar -xf data/fma_metadata.zip -C data
@@ -66,35 +135,18 @@ python ml/src/preprocess.py --fma-dir data/fma_medium --metadata-dir data/fma_me
     --out-dir data/spectrograms --workers 8
 ```
 
-Note: use `tar` (bsdtar) rather than macOS `unzip` - the FMA archives are zip64 and
-`unzip` fails on them. A few FMA mp3s are known to be corrupt; they are skipped and
-listed in `data/spectrograms/failed.csv`.
-
-Everything under `data/` (audio, metadata, spectrograms, checkpoints) stays local and is
-not part of the repository. The preprocessing is deterministic (fixed seed, official
-split), so the resulting dataset is reproducible exactly.
-
-Notebooks (`ml/notebooks/`): `data_analyze.ipynb` - metadata EDA and class decisions;
-`spectrogram_analyze.ipynb` - a look at the preprocessed spectrograms;
-`baseline_results.ipynb` - baseline CNN results; `resnet_results.ipynb` - the transfer
-learning experiment log; `final_evaluation.ipynb` - one-time test evaluation of the
-chosen model.
-
-## Training setup and tools
-
-Everything was trained locally on a MacBook Pro (Apple M3 Pro, 18 GB RAM) using the MPS
-backend of PyTorch - no cloud GPUs. Rough timings: full dataset preprocessing ~3 minutes
-with 8 workers; one SmallCNN epoch ~5 minutes; one ResNet18 epoch ~7 minutes; the whole
-experiment series is about 10 GPU-hours.
+Note: use `tar` (bsdtar) rather than macOS `unzip` - the FMA archives are
+zip64 and `unzip` fails on them. A few FMA mp3s are known to be corrupt; they
+are skipped and listed in `data/spectrograms/failed.csv`.
 
 Training runs are launched with `ml/src/train.py` (run from `ml/src`):
 
 ```bash
-# baseline SmallCNN
-python train.py --out-dir ../../data/runs/baseline
-
-# final model: SmallCNN + SpecAugment, longer schedule
+# final model: SmallCNN + SpecAugment
 python train.py --augment --epochs 25 --out-dir ../../data/runs/baseline_aug
+
+# plain baseline
+python train.py --out-dir ../../data/runs/baseline
 
 # ResNet18 transfer learning variants
 python train.py --model resnet18 --lr 1e-4 --epochs 12 \
@@ -105,27 +157,34 @@ python train.py --model resnet18 --lr 1e-4 --epochs 12 --augment --freeze-early 
     --mixup 0.3 --label-smoothing 0.1 --out-dir ../../data/runs/resnet18_mixup
 ```
 
-Each run writes `history.csv`, the best checkpoint (`best.pt`, selected by validation
-macro-F1) and TensorBoard logs into its own folder under `data/runs/`. Live monitoring
-of all runs at once:
-
-```bash
-tensorboard --logdir data/runs
-```
+Each run writes `history.csv`, the best checkpoint (selected by validation
+macro-F1) and TensorBoard logs into its folder under `data/runs/`. Live
+monitoring: `tensorboard --logdir data/runs`.
 
 ![TensorBoard: all training runs](docs/img/tensorboard.png)
+
+Everything was trained locally on a MacBook Pro (Apple M3 Pro, 18 GB RAM,
+MPS backend): full preprocessing ~3 minutes, one SmallCNN epoch ~5 minutes,
+one ResNet18 epoch ~7 minutes, the whole experiment series ~10 GPU-hours.
+
+## Windows / Linux
+
+The app builds for Windows and Linux (`flutter build windows` /
+`flutter build linux` on the respective OS) and the SPECTROGRAM tab plus the
+server work everywhere. Live system-audio capture is implemented only for
+macOS (ScreenCaptureKit); on other platforms the LIVE tab explains this.
 
 ## Dataset license and attribution
 
 This project uses the FMA dataset for non-commercial, educational research:
 
 > Michaël Defferrard, Kirell Benzi, Pierre Vandergheynst, Xavier Bresson.
-> *FMA: A Dataset For Music Analysis.* 18th International Society for Music Information
-> Retrieval Conference (ISMIR), 2017. https://arxiv.org/abs/1612.01840
+> *FMA: A Dataset For Music Analysis.* 18th International Society for Music
+> Information Retrieval Conference (ISMIR), 2017.
+> https://arxiv.org/abs/1612.01840
 
-- The audio comes from the [Free Music Archive](https://freemusicarchive.org/); each
-  track is distributed under its own Creative Commons license (per-track license info is
-  in the FMA metadata).
+- The audio comes from the [Free Music Archive](https://freemusicarchive.org/);
+  each track is distributed under its own Creative Commons license.
 - The FMA metadata is released under CC BY 4.0.
-- No audio or metadata is redistributed in this repository - the scripts above download
+- No audio is redistributed in this repository - the scripts above download
   everything from the official FMA mirrors.
