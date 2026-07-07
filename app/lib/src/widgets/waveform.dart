@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../audio_analysis.dart';
 import '../theme.dart';
@@ -8,18 +9,65 @@ import 'painter_cache.dart';
 
 /// Level history, meter-style: RMS bars colored by level, a peak trace on
 /// top, and the band between them showing the dynamics (crest factor).
-/// Narrow band = heavily compressed material, wide band = dynamic material.
-class WaveformView extends StatelessWidget {
+/// A ticker interpolates the horizontal scroll between chunks, so the strip
+/// slides continuously instead of stepping once per 100ms chunk.
+class WaveformView extends StatefulWidget {
   const WaveformView({super.key, required this.wave});
 
   final WaveHistory wave;
+
+  @override
+  State<WaveformView> createState() => _WaveformViewState();
+}
+
+class _WaveformViewState extends State<WaveformView>
+    with SingleTickerProviderStateMixin {
+  static const _chunkPeriodS = 0.1; // one history entry per 100ms of audio
+
+  late final Ticker _ticker;
+  final ValueNotifier<int> _frame = ValueNotifier<int>(0);
+
+  int _lastTotal = -1;
+  Duration _lastChunk = Duration.zero;
+  double _fraction = 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = createTicker(_onTick)..start();
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    _frame.dispose();
+    super.dispose();
+  }
+
+  void _onTick(Duration elapsed) {
+    if (widget.wave.total != _lastTotal) {
+      _lastTotal = widget.wave.total;
+      _lastChunk = elapsed;
+    }
+    final fraction =
+        ((elapsed - _lastChunk).inMicroseconds / 1e6 / _chunkPeriodS)
+            .clamp(0.0, 1.0);
+    if ((fraction - _fraction).abs() > 0.001) {
+      _fraction = fraction;
+      _frame.value++;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
       child: CustomPaint(
         painter: const _WaveGridPainter(),
-        foregroundPainter: _WaveDataPainter(wave),
+        foregroundPainter: _WaveDataPainter(
+          wave: widget.wave,
+          fraction: () => _fraction,
+          repaint: Listenable.merge([widget.wave, _frame]),
+        ),
         child: const SizedBox.expand(),
       ),
     );
@@ -67,9 +115,16 @@ class _WaveGridPainter extends CustomPainter {
 }
 
 class _WaveDataPainter extends CustomPainter {
-  _WaveDataPainter(this.wave) : super(repaint: wave);
+  _WaveDataPainter({
+    required this.wave,
+    required this.fraction,
+    required Listenable repaint,
+  }) : super(repaint: repaint);
 
   final WaveHistory wave;
+
+  /// 0..1 progress toward the next chunk; drives the sub-bar scroll offset.
+  final double Function() fraction;
 
   // one history entry is a 100ms chunk, so 50 entries = one 5s model window
   static const _chunksPerWindow = 50;
@@ -80,8 +135,14 @@ class _WaveDataPainter extends CustomPainter {
     if (n == 0) return;
     final plotWidth = size.width - _rightAxis;
     final barWidth = plotWidth / wave.capacity;
+    // bars slide left as the next chunk approaches; the new one enters
+    // from behind the right edge
+    final dx = (1 - fraction()) * barWidth;
 
-    _paintSegments(canvas, size, plotWidth, barWidth);
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, 0, plotWidth, size.height));
+
+    _paintSegments(canvas, size, plotWidth, barWidth, dx);
 
     final peakPath = Path();
     var peakStarted = false;
@@ -89,18 +150,16 @@ class _WaveDataPainter extends CustomPainter {
       ..color = AppColors.accent.withValues(alpha: 0.14);
 
     for (var i = 0; i < n; i++) {
-      final x = plotWidth - (n - i) * barWidth;
-      if (x < 0) continue;
+      final x = plotWidth - (n - i) * barWidth + dx;
+      if (x < -barWidth) continue;
       final rmsDb = wave.rmsAt(i);
       final rmsY = _y(rmsDb, size);
       final peakY = _y(wave.peakAt(i), size);
 
-      // rms body, colored by how hot the signal is
       canvas.drawRect(
         Rect.fromLTRB(x, rmsY, x + barWidth * 0.85, size.height),
         Paint()..color = _levelColor(rmsDb).withValues(alpha: 0.80),
       );
-      // dynamics band: the headroom between peak and rms
       if (peakY < rmsY) {
         canvas.drawRect(
           Rect.fromLTRB(x, peakY, x + barWidth * 0.85, rmsY),
@@ -125,6 +184,8 @@ class _WaveDataPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
 
+    canvas.restore();
+
     if (wave.lastPeakDb >= _clipDb) {
       final tp = cachedLabel('CLIP', color: AppColors.warn);
       canvas.drawCircle(
@@ -138,9 +199,8 @@ class _WaveDataPainter extends CustomPainter {
 
   /// 5s slices tied to the audio itself: block boundaries sit at fixed
   /// positions in the stream and scroll left together with the bars.
-  /// Alternating shading makes each 5s piece readable at a glance.
-  void _paintSegments(
-      Canvas canvas, Size size, double plotWidth, double barWidth) {
+  void _paintSegments(Canvas canvas, Size size, double plotWidth,
+      double barWidth, double dx) {
     final n = wave.length;
     final firstGlobal = wave.total - n;
     final shade = Paint()..color = AppColors.text.withValues(alpha: 0.03);
@@ -148,16 +208,15 @@ class _WaveDataPainter extends CustomPainter {
       ..color = AppColors.panelBorder
       ..strokeWidth = 1;
 
-    var blockStart =
-        (firstGlobal ~/ _chunksPerWindow) * _chunksPerWindow;
+    var blockStart = (firstGlobal ~/ _chunksPerWindow) * _chunksPerWindow;
     for (; blockStart < wave.total; blockStart += _chunksPerWindow) {
       final startIndex = blockStart - firstGlobal;
-      final x0 = plotWidth - (n - startIndex) * barWidth;
+      final x0 = plotWidth - (n - startIndex) * barWidth + dx;
       final x1 = x0 + _chunksPerWindow * barWidth;
       if ((blockStart ~/ _chunksPerWindow).isEven) {
         canvas.drawRect(
-          Rect.fromLTRB(math.max(x0, 0), 0,
-              math.min(x1, plotWidth), size.height),
+          Rect.fromLTRB(
+              math.max(x0, 0), 0, math.min(x1, plotWidth), size.height),
           shade,
         );
       }
