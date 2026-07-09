@@ -135,6 +135,21 @@ class SessionController {
         'avg_latency=${_posts == 0 ? 0 : (_latencySum / _posts).toStringAsFixed(1)}ms');
   }
 
+  /// Full reload from the refresh button: clears the meters, verdicts and
+  /// the server-side session. Works both live (starts a fresh session) and
+  /// stopped (unfreezes the last picture).
+  Future<void> refresh() async {
+    _resetSessionState();
+    error.value = null;
+    if (capturing.value) sessionStartedAt.value = DateTime.now();
+    log('session', 'manual refresh');
+    try {
+      await client.reset();
+    } catch (e) {
+      log('server', 'reset failed: $e');
+    }
+  }
+
   void _resetSessionState() {
     _pending.clear();
     wave.clear();

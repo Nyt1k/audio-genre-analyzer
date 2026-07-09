@@ -70,6 +70,10 @@ class _AnalyzerPageState extends State<AnalyzerPage> {
             startedAt: _controller.sessionStartedAt,
             onSourceChanged: (v) => setState(() => _sourcePid = v),
             onSourcesOpened: _refreshApps,
+            onRefresh: () {
+              _refreshApps();
+              _controller.refresh();
+            },
             onStart: _start,
             onStop: _controller.stop,
           ),

@@ -14,6 +14,7 @@ class TopBar extends StatelessWidget {
     required this.startedAt,
     required this.onSourceChanged,
     required this.onSourcesOpened,
+    required this.onRefresh,
     required this.onStart,
     required this.onStop,
   });
@@ -25,6 +26,7 @@ class TopBar extends StatelessWidget {
   final ValueNotifier<DateTime?> startedAt;
   final ValueChanged<int?> onSourceChanged;
   final VoidCallback onSourcesOpened;
+  final VoidCallback onRefresh;
   final VoidCallback onStart;
   final VoidCallback onStop;
 
@@ -62,9 +64,9 @@ class TopBar extends StatelessWidget {
         ),
         const SizedBox(width: 4),
         IconButton(
-          onPressed: onSourcesOpened,
+          onPressed: onRefresh,
           icon: const Icon(Icons.refresh, size: 18, color: AppColors.dim),
-          tooltip: 'Refresh source list',
+          tooltip: 'Full reload: clear meters, verdicts and session',
         ),
         const SizedBox(width: 8),
         TransportButton(capturing: capturing, onStart: onStart, onStop: onStop),
